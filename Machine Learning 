@@ -1,0 +1,41 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error, r2_score
+
+# 1. Carregar os dados da empresa
+# Substitua 'dados_empresa.csv' pelo nome do seu arquivo
+df = pd.read_csv('dados_empresa.csv')
+
+# 2. Separar os dados
+# X = Colunas que ajudam a prever (recursos)
+# y = A coluna com o valor que você quer prever (alvo)
+# (Substitua 'Vendas' pelo nome real da sua coluna alvo)
+X = df.drop(columns=['Vendas']) 
+y = df['Vendas']
+
+# 3. Dividir os dados em treino (80%) e teste (20%)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_split_size=0.2, random_state=42)
+
+# 4. Escolher e Treinar o Modelo (Random Forest é excelente para dados de empresas)
+modelo = RandomForestRegressor(random_state=42)
+modelo.fit(X_train, y_train)
+
+# 5. Avaliar a precisão do modelo
+previsoes = modelo.predict(X_test)
+erro_medio = mean_absolute_error(y_test, previsoes)
+score_r2 = r2_score(y_test, previsoes)
+
+print(f"🎯 Erro Médio Absoluto: {erro_medio:.2f}")
+print(f"📊 Precisão do Modelo (R² Score): {score_r2 * 100:.1f}%")
+
+# 6. Fazer uma nova previsão com dados inéditos
+# Altere os valores abaixo de acordo com as colunas que você tem no seu X
+novos_dados = pd.DataFrame([{
+    'Gasto_Anuncio': 1500.00,
+    'Mes': 12,
+    'Preco': 49.90
+}])
+
+previsao_futura = modelo.predict(novos_dados)
+print(f"🔮 Previsão para os novos dados: {previsao_futura[0]:.2f}")
