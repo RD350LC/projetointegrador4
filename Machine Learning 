@@ -1,41 +1,95 @@
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.linear_model import LinearRegression
 
-# 1. Carregar os dados da empresa
-# Substitua 'dados_empresa.csv' pelo nome do seu arquivo
-df = pd.read_csv('dados_empresa.csv')
+# 1. Base de dados dos últimos 10 anos (Índice ONI vs Produção CONAB)
+dados = {
+    "ano": [
+        "16/17",
+        "17/18",
+        "18/19",
+        "19/20",
+        "20/21",
+        "21/22",
+        "22/23",
+        "23/24",
+        "24/25",
+        "25/26",
+    ],
+    "indice_oni": [-0.3, -0.7, 0.7, 0.5, -1.0, -0.9, -0.4, 1.8, -0.2, 2.0],
+    "producao_graos": [
+        237.7,
+        227.9,
+        242.1,
+        257.0,
+        255.5,
+        271.4,
+        322.8,
+        298.4,
+        352.0,
+        360.1,
+    ],
+}
 
-# 2. Separar os dados
-# X = Colunas que ajudam a prever (recursos)
-# y = A coluna com o valor que você quer prever (alvo)
-# (Substitua 'Vendas' pelo nome real da sua coluna alvo)
-X = df.drop(columns=['Vendas']) 
-y = df['Vendas']
+df = pd.DataFrame(dados)
 
-# 3. Dividir os dados em treino (80%) e teste (20%)
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_split_size=0.2, random_state=42)
+# 2. Configurando as variáveis do modelo de Machine Learning
+X = df[["indice_oni"]]  # Feature (Variável Independente)
+y = df["producao_graos"]  # Target (Variável Dependente)
 
-# 4. Escolher e Treinar o Modelo (Random Forest é excelente para dados de empresas)
-modelo = RandomForestRegressor(random_state=42)
-modelo.fit(X_train, y_train)
+# 3. Criando e treinando o modelo de Regressão Linear
+modelo = LinearRegression()
+modelo.fit(X, y)
 
-# 5. Avaliar a precisão do modelo
-previsoes = modelo.predict(X_test)
-erro_medio = mean_absolute_error(y_test, previsoes)
-score_r2 = r2_score(y_test, previsoes)
+# 4. Gerando pontos para desenhar a linha de tendência do modelo
+X_linha = np.linspace(df["indice_oni"].min() - 0.2, df["indice_oni"].max() + 0.2, 100).reshape(-1, 1)
+y_linha = modelo.predict(X_linha)
 
-print(f"🎯 Erro Médio Absoluto: {erro_medio:.2f}")
-print(f"📊 Precisão do Modelo (R² Score): {score_r2 * 100:.1f}%")
+# 5. Construindo o Gráfico de Dispersão
+plt.figure(figsize=(10, 6))
 
-# 6. Fazer uma nova previsão com dados inéditos
-# Altere os valores abaixo de acordo com as colunas que você tem no seu X
-novos_dados = pd.DataFrame([{
-    'Gasto_Anuncio': 1500.00,
-    'Mes': 12,
-    'Preco': 49.90
-}])
+# Plota os dados reais coletados (Pontos Azuis)
+plt.scatter(
+    df["indice_oni"],
+    df["producao_graos"],
+    color="blue",
+    s=100,
+    zorder=5,
+    label="Dados Reais (Safras Históricas)",
+)
 
-previsao_futura = modelo.predict(novos_dados)
-print(f"🔮 Previsão para os novos dados: {previsao_futura[0]:.2f}")
+# Plota a linha de previsão do Machine Learning (Linha Vermelha)
+plt.plot(X_linha, y_linha, color="red", linestyle="--", linewidth=2, label="Linha de Tendência do Modelo (ML)")
+
+# Adicionando anotações para destacar os extremos (La Niña vs El Niño)
+plt.axvline(x=0, color="gray", linestyle=":", alpha=0.7)
+plt.text(-1.1, 340, "⬅ LA NIÑA (Frio)", color="darkblue", fontsize=10, fontweight="bold")
+plt.text(1.2, 340, "EL NIÑO (Calor) ➡", color="darkred", fontsize=10, fontweight="bold")
+
+# Identificando o ano de quebra do Super El Niño no gráfico
+plt.annotate(
+    "Quebra Safra 23/24\n(Super El Niño)",
+    xy=(1.8, 298.4),
+    xytext=(1.0, 270),
+    arrowprops=dict(facecolor="black", shrink=0.05, width=1, headwidth=6),
+    fontsize=9,
+    bbox=dict(boxstyle="round,pad=0.3", fc="yellow", alpha=0.5),
+)
+
+# Customização de títulos e eixos
+plt.title("Projeto Escolar: Predição de Impacto Climático usando Machine Learning", fontsize=14, pad=15)
+plt.xlabel("Índice ONI (Anomalia de Temperatura do Oceano Pacífico)", fontsize=11)
+plt.ylabel("Produção de Grãos no Brasil (Milhões de Toneladas)", fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.legend(loc="lower right")
+
+# Exibe o gráfico na tela
+plt.show()
+
+# 6. Exibindo métricas do seu modelo para colocar nos slides da apresentação
+print(f"--- MÓDULO DE RESULTADOS DO MODELO ---")
+print(f"Coeficiente de Inclinação (Sinal do impacto): {modelo.coef_[0]:.2f}")
+print(
+    "Nota: Se o coeficiente for positivo, indica que no acumulado de 10 anos a produção subiu por fatores tecnológicos, mesmo enfrentando variações climáticas locais."
+)
