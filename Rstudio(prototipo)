@@ -1,0 +1,68 @@
+# 1. INSTALAÇÃO E CARREGAMENTO DOS PACOTES ---------------------------------
+# O RStudio Server vai instalar caso você ainda não os tenha
+pacotes <- c("readxl", "tidymodels", "vip")
+novos_pacotes <- pacotes[!(pacotes %in% installed.packages()[,"Package"])]
+if(length(novos_pacotes)) install.packages(novos_pacotes)
+
+library(readxl)
+library(tidymodels)
+library(vip) # Para importância das variáveis
+
+# 2. IMPORTAÇÃO DOS DADOS --------------------------------------------------
+# Substitua pelo caminho do seu arquivo e o nome da sua variável alvo (target)
+caminho_excel <- "seu_arquivo.xlsx" 
+nome_aba      <- "Sheet1"         # Altere se necessário
+
+dados <- read_excel(caminho_excel, sheet = nome_aba)
+
+# IMPORTANTE: Altere 'target' para o nome exato da coluna que você quer prever
+# Se for uma classificação (ex: Sim/Não), transformamos em fator (factor)
+dados <- dados %>% 
+  mutate(target = as.factor(target)) 
+
+# 3. DIVISÃO DOS DADOS (TREINO E TESTE) -------------------------------------
+set.seed(123) # Garante que os resultados sejam reproduzíveis
+divisao_dados <- initial_split(dados, prop = 0.75, strata = target)
+
+dados_treino <- training(divisao_dados)
+dados_teste  <- testing(divisao_dados)
+
+# 4. PRÉ-PROCESSAMENTO (RECEITA) -------------------------------------------
+# Definimos a fórmula e tratamos os dados (ex: imputar nulos, normalizar)
+receita_ml <- recipe(target ~ ., data = dados_treino) %>% 
+  step_impute_median(all_numeric_predictors()) %>% # Trata valores numéricos ausentes
+  step_impute_mode(all_nominal_predictors()) %>%   # Trata valores categóricos ausentes
+  step_novel(all_nominal_predictors()) %>%         # Lida com novas categorias no teste
+  step_dummy(all_nominal_predictors()) %>%         # Transforma categorias em 0 e 1
+  step_zv(all_predictors())                        # Remove colunas com variância zero
+
+# 5. ESPECIFICAÇÃO DO MODELO (RANDOM FOREST) -------------------------------
+modelo_rf <- rand_forest(trees = 500, min_n = 5) %>% 
+  set_engine("ranger", importance = "permutation") %>% 
+  set_mode("classification") # Mude para "regression" se for prever números contínuos
+
+# 6. CRIAÇÃO DO WORKFLOW ---------------------------------------------------
+# Junta a receita de processamento com o modelo escolhido
+workflow_ml <- workflow() %>% 
+  add_recipe(receita_ml) %>% 
+  add_model(modelo_rf)
+
+# 7. TREINAMENTO DO MODELO -------------------------------------------------
+cat("Iniciando o treinamento do modelo...\n")
+modelo_treinado <- fit(workflow_ml, data = dados_treino)
+
+# 8. AVALIAÇÃO DA PERFORMANCE ---------------------------------------------
+# Faz as previsões usando os dados de teste que o modelo nunca viu
+previsoes <- predict(modelo_treinado, dados_teste) %>% 
+  bind_cols(predict(modelo_treinado, dados_teste, type = "prob")) %>% 
+  bind_cols(dados_teste %>% select(target))
+
+# Métricas de avaliação (Acurácia, Precisão, Sensibilidade, ROC AUC)
+metricas <- metric_set(accuracy, precision, recall, roc_auc)
+resultado_metricas <- metricas(previsoes, truth = target, estimate = .pred_class, .pred_Sim) # Ajuste o '.pred_Sim' conforme suas classes
+
+print("--- Métricas de Avaliação ---")
+print(resultado_metricas)
+
+# Matriz de Confusão
+conf_mat(previsoes, truth = target, estimate = .pred_class)
