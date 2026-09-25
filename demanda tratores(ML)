@@ -1,0 +1,395 @@
+# Previsão de Demanda de Tratores
+
+Este notebook treina um modelo de machine learning para prever o volume de vendas mensal por modelo de trator, utilizando os dados de `workspace.default.analises_gerais_tratores`. Inclui EDA, engenharia de features, treino com Random Forest Regressor, avaliação e rastreamento no MLflow.
+# ============================================
+# 1. CARREGAR DADOS E EDA
+# ============================================
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Carregar dados via Spark SQL e converter para pandas
+df_raw = spark.sql("""
+SELECT 
+  `Modelo`,
+  `Cidade Cliente`,
+  `Data venda`,
+  `Tipo`
+FROM `workspace`.`default`.`analises_gerais_tratores`
+WHERE `Data venda` IS NOT NULL
+""").toPandas()
+
+# Converter data (formato dd/MM/yyyy HH:mm:ss)
+df_raw['data_venda'] = pd.to_datetime(df_raw['Data venda'], format='%d/%m/%Y %H:%M:%S')
+df_raw['ano'] = df_raw['data_venda'].dt.year
+df_raw['mes'] = df_raw['data_venda'].dt.month
+
+print(f"Total de registros: {len(df_raw)}")
+print(f"Período: {df_raw['data_venda'].min()} a {df_raw['data_venda'].max()}")
+print(f"Modelos únicos: {df_raw['Modelo'].nunique()}")
+print(f"Cidades únicas: {df_raw['Cidade Cliente'].nunique()}")
+
+# Tabela de tipos de features
+feature_types = pd.DataFrame({
+    'Feature': ['Modelo', 'Cidade Cliente', 'data_venda', 'ano', 'mes'],
+    'Tipo': ['Categórico nominal', 'Categórico nominal', 'Timestamp', 'Numérico inteiro', 'Numérico inteiro']
+})
+print("\n=== Tipos de Features ===")
+display(feature_types)
+
+# Visualização 1: Vendas por ano
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+df_raw.groupby('ano').size().plot(kind='bar', ax=axes[0], color='steelblue')
+axes[0].set_title('Vendas por Ano')
+axes[0].set_xlabel('Ano')
+axes[0].set_ylabel('Quantidade')
+
+# Visualização 2: Top 15 modelos mais vendidos
+top_modelos = df_raw['Modelo'].value_counts().head(15)
+top_modelos.plot(kind='barh', ax=axes[1], color='coral')
+axes[1].set_title('Top 15 Modelos Mais Vendidos')
+axes[1].set_xlabel('Quantidade')
+
+plt.tight_layout()
+plt.show()
+
+# Visualização 3: Série temporal de vendas mensais
+df_monthly = df_raw.groupby(['ano', 'mes']).size().reset_index(name='vendas')
+df_monthly['data'] = pd.to_datetime(df_monthly['ano'].astype(str) + '-' + df_monthly['mes'].astype(str) + '-01')
+
+fig, ax = plt.subplots(figsize=(14, 5))
+ax.plot(df_monthly['data'], df_monthly['vendas'], marker='o', color='steelblue')
+ax.set_title('Série Temporal de Vendas Mensais')
+ax.set_xlabel('Mês')
+ax.set_ylabel('Vendas')
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+# ============================================
+# 2. PREPARAÇÃO DOS DADOS
+# ============================================
+
+# Agregar vendas por mês/modelo (nosso target de regressão)
+df_agg = df_raw.groupby(['Modelo', 'ano', 'mes']).size().reset_index(name='quantidade_vendas')
+df_agg['data_ref'] = pd.to_datetime(df_agg['ano'].astype(str) + '-' + df_agg['mes'].astype(str) + '-01')
+
+# Engenharia de features temporais
+df_agg['trimestre'] = ((df_agg['mes'] - 1) // 3) + 1
+df_agg['dia_semana_ref'] = df_agg['data_ref'].dt.dayofweek
+
+# Categoria do modelo (prefixo)
+df_agg['categoria_modelo'] = df_agg['Modelo'].str.extract(r'^([A-Z]+\d*)')
+df_agg['categoria_modelo'] = df_agg['categoria_modelo'].fillna('Outros')
+
+# Feature de lag: vendas do mês anterior por modelo
+df_agg = df_agg.sort_values(['Modelo', 'data_ref'])
+df_agg['vendas_mes_anterior'] = df_agg.groupby('Modelo')['quantidade_vendas'].shift(1)
+df_agg['vendas_mes_anterior'] = df_agg['vendas_mes_anterior'].fillna(0)
+
+# Média móvel de 3 meses
+df_agg['media_movel_3m'] = df_agg.groupby('Modelo')['quantidade_vendas'].transform(
+    lambda x: x.shift(1).rolling(3, min_periods=1).mean()
+).fillna(0)
+
+print(f"Registros agregados: {len(df_agg)}")
+print(f"Target (quantidade_vendas) - describe:")
+print(df_agg['quantidade_vendas'].describe())
+
+# Verificar correlação com target
+numerical_features = ['ano', 'mes', 'trimestre', 'dia_semana_ref', 'vendas_mes_anterior', 'media_movel_3m']
+correlations = df_agg[numerical_features + ['quantidade_vendas']].corr()['quantidade_vendas'].drop('quantidade_vendas')
+print("\n=== Correlação com target ===")
+print(correlations.sort_values(ascending=False))
+
+# Visualização: correlação das features com o target
+fig, ax = plt.subplots(figsize=(8, 4))
+correlations.sort_values().plot(kind='barh', ax=ax, color='steelblue')
+ax.set_title('Correlação das Features com Quantidade de Vendas')
+ax.set_xlabel('Correlação')
+plt.tight_layout()
+plt.show()
+# ============================================
+# 3. TREINAR MODELO DE REGRESSAO
+# ============================================
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import mlflow
+import mlflow.sklearn
+from mlflow.models import infer_signature
+
+# Definir features e target
+categorical_features = ['Modelo', 'categoria_modelo']
+numerical_features_model = ['ano', 'mes', 'trimestre', 'dia_semana_ref', 
+                           'vendas_mes_anterior', 'media_movel_3m']
+
+target = 'quantidade_vendas'
+
+X = df_agg[categorical_features + numerical_features_model]
+y = df_agg[target]
+
+# Split temporal: treino ate 2024, teste a partir de 2025
+cutoff_year = 2025
+train_mask = df_agg['ano'] < cutoff_year
+test_mask = df_agg['ano'] >= cutoff_year
+
+X_train, X_test = X[train_mask], X[test_mask]
+y_train, y_test = y[train_mask], y[test_mask]
+
+print(f"Treino: {len(X_train)} registros (ate {cutoff_year - 1})")
+print(f"Teste: {len(X_test)} registros (a partir de {cutoff_year})")
+
+# Construir pipeline de preprocessing + modelo
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler())
+        ]), numerical_features_model),
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', max_categories=50))
+        ]), categorical_features)
+    ]
+)
+
+rf_model = RandomForestRegressor(
+    n_estimators=200,
+    max_depth=15,
+    min_samples_leaf=3,
+    random_state=42,
+    n_jobs=-1
+)
+
+pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('regressor', rf_model)
+])
+
+# Treinar com MLflow
+mlflow.set_experiment('/Users/demanda_tratores_rf')
+
+with mlflow.start_run(run_name='demand_forecast_rf_v1'):
+    mlflow.log_param('model_type', 'RandomForestRegressor')
+    mlflow.log_param('n_estimators', 200)
+    mlflow.log_param('max_depth', 15)
+    mlflow.log_param('min_samples_leaf', 3)
+    mlflow.log_param('split_strategy', f'temporal_<{cutoff_year}')
+    mlflow.log_param('train_size', len(X_train))
+    mlflow.log_param('test_size', len(X_test))
+    
+    # Treinar
+    pipeline.fit(X_train, y_train)
+    
+    # Previsoes
+    y_pred = pipeline.predict(X_test)
+    y_pred = np.maximum(y_pred, 0)  # Nao permitir vendas negativas
+    
+    # Metricas
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    mae = mean_absolute_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+    
+    mlflow.log_metric('rmse', rmse)
+    mlflow.log_metric('mae', mae)
+    mlflow.log_metric('r2', r2)
+    
+    print(f"\n=== Metricas de Avaliacao ===")
+    print(f"RMSE: {rmse:.2f}")
+    print(f"MAE:  {mae:.2f}")
+    print(f"R2:   {r2:.4f}")
+    
+    # Logar modelo com assinatura
+    signature = infer_signature(X_train.head(100), pipeline.predict(X_train.head(100)))
+    model_info = mlflow.sklearn.log_model(
+        pipeline,
+        name='demand_forecast_model',
+        signature=signature,
+        input_example=X_train.head(3)
+    )
+    
+    print(f"\nModelo salvo no MLflow: {model_info.model_uri}")
+# ============================================
+# 4. AVALIACAO E VISUALIZACAO DE RESULTADOS
+# ============================================
+
+# Importancia das features
+feature_names_num = numerical_features_model
+feature_names_cat = pipeline.named_steps['preprocessor'].named_transformers_['cat'].get_feature_names_out(categorical_features)
+all_feature_names = list(feature_names_num) + list(feature_names_cat)
+
+importances = pipeline.named_steps['regressor'].feature_importances_
+importance_df = pd.DataFrame({
+    'feature': all_feature_names,
+    'importance': importances
+}).sort_values('importance', ascending=False).head(20)
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+# Top 20 features mais importantes
+importance_df.plot(kind='barh', x='feature', y='importance', ax=axes[0], color='steelblue')
+axes[0].set_title('Top 20 Features Mais Importantes')
+axes[0].set_xlabel('Importancia')
+axes[0].invert_yaxis()
+
+# Previsoes vs Real
+results_df = pd.DataFrame({'real': y_test.values, 'previsto': y_pred})
+results_df = results_df.reset_index(drop=True)
+
+axes[1].scatter(results_df['real'], results_df['previsto'], alpha=0.5, color='steelblue')
+max_val = max(results_df['real'].max(), results_df['previsto'].max())
+axes[1].plot([0, max_val], [0, max_val], 'r--', lw=2)
+axes[1].set_xlabel('Vendas Reais')
+axes[1].set_ylabel('Vendas Previstas')
+axes[1].set_title(f'Previsoes vs Real (R2={r2:.3f})')
+
+plt.tight_layout()
+plt.show()
+
+# Amostra de previsoes
+print("\n=== Amostra de Previsoes ===")
+results_sample = X_test.copy()
+results_sample['real'] = y_test.values
+results_sample['previsto'] = y_pred
+results_sample['erro'] = results_sample['real'] - results_sample['previsto']
+display(results_sample[['Modelo', 'ano', 'mes', 'real', 'previsto', 'erro']].head(20))
+
+# Previsoes agregadas por mes
+monthly_comparison = results_sample.groupby(['ano', 'mes']).agg(
+    real=('real', 'sum'),
+    previsto=('previsto', 'sum')
+).reset_index()
+
+fig, ax = plt.subplots(figsize=(14, 5))
+x = range(len(monthly_comparison))
+ax.bar([i - 0.2 for i in x], monthly_comparison['real'], 0.4, label='Real', color='steelblue')
+ax.bar([i + 0.2 for i in x], monthly_comparison['previsto'], 0.4, label='Previsto', color='coral')
+ax.set_xticks(x)
+ax.set_xticklabels([f"{int(r['ano'])}/{int(r['mes']):02d}" for _, r in monthly_comparison.iterrows()], rotation=45)
+ax.set_title('Vendas Reais vs Previstas por Mes')
+ax.set_ylabel('Quantidade de Vendas')
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+print(f"\nRMSE: {rmse:.2f} | MAE: {mae:.2f} | R2: {r2:.4f}")
+# ============================================
+# 5. OTIMIZACAO DE HIPERPARAMETROS
+# ============================================
+# RandomizedSearchCV com TimeSeriesSplit (respeita a ordem temporal)
+# ~30 iteracoes x 3 folds = ~90 fits de RandomForest
+
+from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
+from scipy.stats import randint, uniform
+import time
+
+# Recriar o pipeline base (mesma estrutura, porem com parametros que serao otimizados)
+preprocessor_opt = ColumnTransformer(
+    transformers=[
+        ('num', Pipeline([
+            ('imputer', SimpleImputer(strategy='mean')),
+            ('scaler', StandardScaler())
+        ]), numerical_features_model),
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', max_categories=50))
+        ]), categorical_features)
+    ]
+)
+
+pipeline_opt = Pipeline([
+    ('preprocessor', preprocessor_opt),
+    ('regressor', RandomForestRegressor(random_state=42, n_jobs=-1))
+])
+
+# Espaco de busca de hiperparametros
+param_distributions = {
+    'regressor__n_estimators': [100, 200, 300, 500],
+    'regressor__max_depth': [5, 10, 15, 20, None],
+    'regressor__min_samples_leaf': [1, 2, 3, 5, 10],
+    'regressor__min_samples_split': [2, 5, 10],
+    'regressor__max_features': ['sqrt', 'log2', 1.0]
+}
+
+# TimeSeriesSplit: mantem a ordem temporal nos folds
+tscv = TimeSeriesSplit(n_splits=3)
+
+search = RandomizedSearchCV(
+    estimator=pipeline_opt,
+    param_distributions=param_distributions,
+    n_iter=30,
+    cv=tscv,
+    scoring='r2',
+    n_jobs=-1,
+    random_state=42,
+    verbose=1
+)
+
+print("Iniciando busca de hiperparametros (30 iteracoes x 3 folds)...\n")
+start_time = time.time()
+
+# Ordenar treino por data para TimeSeriesSplit funcionar corretamente
+train_sorted_idx = df_agg[train_mask].sort_values('data_ref').index
+X_train_sorted = X_train.loc[train_sorted_idx]
+y_train_sorted = y_train.loc[train_sorted_idx]
+
+search.fit(X_train_sorted, y_train_sorted)
+
+elapsed = time.time() - start_time
+print(f"\nBusca concluida em {elapsed:.1f}s")
+print(f"\n=== Melhores hiperparametros ===")
+for param, value in search.best_params_.items():
+    print(f"  {param}: {value}")
+print(f"\nMelhor R2 (CV): {search.best_score_:.4f}")
+
+# Avaliar melhor modelo no conjunto de teste
+best_model = search.best_estimator_
+y_pred_opt = best_model.predict(X_test)
+y_pred_opt = np.maximum(y_pred_opt, 0)
+
+rmse_opt = np.sqrt(mean_squared_error(y_test, y_pred_opt))
+mae_opt = mean_absolute_error(y_test, y_pred_opt)
+r2_opt = r2_score(y_test, y_pred_opt)
+
+print(f"\n=== Comparacao: Baseline vs Otimizado ===")
+print(f"{'Metrica':<10} {'Baseline':>10} {'Otimizado':>10} {'Delta':>10}")
+print(f"{'RMSE':<10} {rmse:>10.2f} {rmse_opt:>10.2f} {rmse_opt - rmse:>+10.2f}")
+print(f"{'MAE':<10} {mae:>10.2f} {mae_opt:>10.2f} {mae_opt - mae:>+10.2f}")
+print(f"{'R2':<10} {r2:>10.4f} {r2_opt:>10.4f} {r2_opt - r2:>+10.4f}")
+
+# Logar melhor modelo no MLflow
+with mlflow.start_run(run_name='demand_forecast_rf_optimized'):
+    mlflow.log_params({f'best_{k}': v for k, v in search.best_params_.items()})
+    mlflow.log_param('search_method', 'RandomizedSearchCV')
+    mlflow.log_param('n_iter', 30)
+    mlflow.log_param('cv_folds', 3)
+    mlflow.log_metric('rmse', rmse_opt)
+    mlflow.log_metric('mae', mae_opt)
+    mlflow.log_metric('r2', r2_opt)
+    mlflow.log_metric('cv_best_r2', search.best_score_)
+    mlflow.log_metric('baseline_rmse', rmse)
+    mlflow.log_metric('baseline_r2', r2)
+    
+    signature_opt = infer_signature(X_train.head(100), best_model.predict(X_train.head(100)))
+    model_info_opt = mlflow.sklearn.log_model(
+        best_model,
+        name='demand_forecast_model_optimized',
+        signature=signature_opt,
+        input_example=X_train.head(3)
+    )
+    print(f"\nModelo otimizado salvo no MLflow: {model_info_opt.model_uri}")
+
+# Visualizar comparacao
+top10_results = pd.DataFrame(search.cv_results_).sort_values('rank_test_score').head(10)
+print(f"\n=== Top 10 combinacoes (por R2 CV) ===")
+top10_display = top10_results[['mean_test_score', 'std_test_score', 'params']].rename(
+    columns={'mean_test_score': 'R2_media', 'std_test_score': 'R2_std', 'params': 'Parametros'}
+).reset_index(drop=True)
+top10_display['Parametros'] = top10_display['Parametros'].astype(str)
+display(top10_display)
