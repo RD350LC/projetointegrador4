@@ -1,0 +1,302 @@
+Modelo de Machine Learning - Previsão de Vendas de Colheitadeiras
+Visão Geral
+Este documento apresenta um guia completo para treinar um modelo de machine learning para prever vendas de colheitadeiras por cidade, utilizando o arquivo Excel fornecido.
+Estrutura dos Dados
+Com base no arquivo analises_gerais_colheitadeiras.xlsx, os dados contêm as seguintes colunas:
+Veículo: Identificador do veículo
+Modelo: Modelo da colheitadeira
+Data venda: Data da transação
+Tipo: Tipo de colheitadeira
+Cidade Cliente: Cidade onde ocorreu a venda
+Código Python para Treinamento do Modelo
+1. Importar Bibliotecas e Carregar Dados
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+
+# Carregar o arquivo Excel
+df = pd.read_excel('analises_gerais_colheitadeiras.xlsx')
+
+# Visualizar primeiras linhas
+print("Primeiras linhas do dataset:")
+print(df.head())
+print(f"\nShape: {df.shape}")
+print(f"\nInformações do dataset:")
+print(df.info())
+2. Análise Exploratória e Preparação dos Dados
+# Verificar valores nulos
+print("\nValores nulos por coluna:")
+print(df.isnull().sum())
+
+# Remover valores nulos se necessário
+df = df.dropna()
+
+# Converter data para features temporais
+df['Data venda'] = pd.to_datetime(df['Data venda'])
+df['ano'] = df['Data venda'].dt.year
+df['mes'] = df['Data venda'].dt.month
+df['trimestre'] = df['Data venda'].dt.quarter
+df['dia_semana'] = df['Data venda'].dt.dayofweek
+
+# Agregar vendas por cidade (criar variável target)
+vendas_por_cidade = df.groupby('Cidade Cliente').agg({
+    'Veículo': 'count',  # Total de vendas
+    'Modelo': lambda x: x.mode()[0] if len(x.mode()) > 0 else x.iloc[0],  # Modelo mais vendido
+    'Tipo': lambda x: x.mode()[0] if len(x.mode()) > 0 else x.iloc[0],  # Tipo mais vendido
+    'ano': 'mean',
+    'mes': 'mean'
+}).reset_index()
+
+vendas_por_cidade.columns = ['cidade', 'total_vendas', 'modelo_principal', 'tipo_principal', 'ano_medio', 'mes_medio']
+
+print("\nVendas agregadas por cidade:")
+print(vendas_por_cidade.head(10))
+print(f"\nEstatísticas de vendas por cidade:")
+print(vendas_por_cidade['total_vendas'].describe())
+3. Engenharia de Features
+# Criar features adicionais baseadas em histórico
+# Vendas por modelo em cada cidade
+vendas_modelo_cidade = df.groupby(['Cidade Cliente', 'Modelo']).size().reset_index(name='vendas_modelo')
+vendas_tipo_cidade = df.groupby(['Cidade Cliente', 'Tipo']).size().reset_index(name='vendas_tipo')
+
+# Tendência temporal por cidade
+df_temporal = df.groupby(['Cidade Cliente', 'ano', 'mes']).size().reset_index(name='vendas_mes')
+
+# Calcular média móvel de vendas (últimos 3 meses)
+df_temporal = df_temporal.sort_values(['Cidade Cliente', 'ano', 'mes'])
+df_temporal['vendas_media_movel_3m'] = df_temporal.groupby('Cidade Cliente')['vendas_mes'].transform(
+    lambda x: x.rolling(window=3, min_periods=1).mean()
+)
+
+print("\nFeatures temporais criadas:")
+print(df_temporal.head(10))
+4. Preparar Dados para Modelagem
+# Codificar variáveis categóricas
+le_cidade = LabelEncoder()
+le_modelo = LabelEncoder()
+le_tipo = LabelEncoder()
+
+vendas_por_cidade['cidade_encoded'] = le_cidade.fit_transform(vendas_por_cidade['cidade'])
+vendas_por_cidade['modelo_encoded'] = le_modelo.fit_transform(vendas_por_cidade['modelo_principal'])
+vendas_por_cidade['tipo_encoded'] = le_tipo.fit_transform(vendas_por_cidade['tipo_principal'])
+
+# Selecionar features e target
+features = ['cidade_encoded', 'modelo_encoded', 'tipo_encoded', 'ano_medio', 'mes_medio']
+X = vendas_por_cidade[features]
+y = vendas_por_cidade['total_vendas']
+
+print(f"\nShape das features: {X.shape}")
+print(f"Shape do target: {y.shape}")
+5. Dividir Dados em Treino e Teste
+# Split 80/20
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+print(f"\nTreino: {X_train.shape[0]} amostras")
+print(f"Teste: {X_test.shape[0]} amostras")
+6. Treinar Múltiplos Modelos
+# Dicionário para armazenar modelos
+modelos = {
+    'Linear Regression': LinearRegression(),
+    'Random Forest': RandomForestRegressor(n_estimators=100, random_state=42, max_depth=10),
+    'Gradient Boosting': GradientBoostingRegressor(n_estimators=100, random_state=42, max_depth=5)
+}
+
+# Treinar e avaliar cada modelo
+resultados = {}
+
+for nome, modelo in modelos.items():
+    print(f"\n{'='*60}")
+    print(f"Treinando: {nome}")
+    print('='*60)
+    
+    # Treinar
+    modelo.fit(X_train, y_train)
+    
+    # Prever
+    y_pred_train = modelo.predict(X_train)
+    y_pred_test = modelo.predict(X_test)
+    
+    # Métricas
+    mae_train = mean_absolute_error(y_train, y_pred_train)
+    mae_test = mean_absolute_error(y_test, y_pred_test)
+    rmse_train = np.sqrt(mean_squared_error(y_train, y_pred_train))
+    rmse_test = np.sqrt(mean_squared_error(y_test, y_pred_test))
+    r2_train = r2_score(y_train, y_pred_train)
+    r2_test = r2_score(y_test, y_pred_test)
+    
+    resultados[nome] = {
+        'modelo': modelo,
+        'mae_train': mae_train,
+        'mae_test': mae_test,
+        'rmse_train': rmse_train,
+        'rmse_test': rmse_test,
+        'r2_train': r2_train,
+        'r2_test': r2_test
+    }
+    
+    print(f"\nMétricas de Treino:")
+    print(f"  MAE:  {mae_train:.2f}")
+    print(f"  RMSE: {rmse_train:.2f}")
+    print(f"  R²:   {r2_train:.4f}")
+    
+    print(f"\nMétricas de Teste:")
+    print(f"  MAE:  {mae_test:.2f}")
+    print(f"  RMSE: {rmse_test:.2f}")
+    print(f"  R²:   {r2_test:.4f}")
+7. Comparar Modelos
+# Criar DataFrame com resultados
+df_resultados = pd.DataFrame({
+    'Modelo': list(resultados.keys()),
+    'MAE Teste': [r['mae_test'] for r in resultados.values()],
+    'RMSE Teste': [r['rmse_test'] for r in resultados.values()],
+    'R² Teste': [r['r2_test'] for r in resultados.values()]
+})
+
+print("\n" + "="*60)
+print("COMPARAÇÃO DE MODELOS")
+print("="*60)
+print(df_resultados.to_string(index=False))
+
+# Identificar melhor modelo
+melhor_modelo_nome = df_resultados.loc[df_resultados['R² Teste'].idxmax(), 'Modelo']
+melhor_modelo = resultados[melhor_modelo_nome]['modelo']
+
+print(f"\n🏆 Melhor modelo: {melhor_modelo_nome}")
+8. Visualizar Importância das Features (Random Forest)
+if 'Random Forest' in resultados:
+    rf_model = resultados['Random Forest']['modelo']
+    
+    # Importância das features
+    importancias = pd.DataFrame({
+        'Feature': features,
+        'Importância': rf_model.feature_importances_
+    }).sort_values('Importância', ascending=False)
+    
+    print("\n" + "="*60)
+    print("IMPORTÂNCIA DAS FEATURES (Random Forest)")
+    print("="*60)
+    print(importancias.to_string(index=False))
+    
+    # Plotar
+    plt.figure(figsize=(10, 6))
+    plt.barh(importancias['Feature'], importancias['Importância'])
+    plt.xlabel('Importância')
+    plt.title('Importância das Features - Random Forest')
+    plt.tight_layout()
+    plt.savefig('feature_importance.png', dpi=300, bbox_inches='tight')
+    print("\n✓ Gráfico salvo: feature_importance.png")
+9. Fazer Previsões para Novas Cidades
+# Exemplo: prever vendas para uma nova cidade
+def prever_vendas_cidade(cidade, modelo_colheitadeira, tipo_colheitadeira, ano, mes):
+    """
+    Prever vendas para uma cidade específica
+    """
+    # Codificar inputs
+    try:
+        cidade_enc = le_cidade.transform([cidade])[0]
+    except:
+        # Se cidade não existe, usar média
+        cidade_enc = vendas_por_cidade['cidade_encoded'].mean()
+    
+    try:
+        modelo_enc = le_modelo.transform([modelo_colheitadeira])[0]
+    except:
+        modelo_enc = vendas_por_cidade['modelo_encoded'].mean()
+    
+    try:
+        tipo_enc = le_tipo.transform([tipo_colheitadeira])[0]
+    except:
+        tipo_enc = vendas_por_cidade['tipo_encoded'].mean()
+    
+    # Criar array de features
+    X_novo = np.array([[cidade_enc, modelo_enc, tipo_enc, ano, mes]])
+    
+    # Prever
+    previsao = melhor_modelo.predict(X_novo)[0]
+    
+    return max(0, round(previsao))  # Garantir que não seja negativo
+
+# Exemplo de uso
+print("\n" + "="*60)
+print("EXEMPLO DE PREVISÃO")
+print("="*60)
+
+# Pegar uma cidade do dataset
+cidade_exemplo = vendas_por_cidade['cidade'].iloc[0]
+modelo_exemplo = vendas_por_cidade['modelo_principal'].iloc[0]
+tipo_exemplo = vendas_por_cidade['tipo_principal'].iloc[0]
+
+previsao = prever_vendas_cidade(
+    cidade=cidade_exemplo,
+    modelo_colheitadeira=modelo_exemplo,
+    tipo_colheitadeira=tipo_exemplo,
+    ano=2024,
+    mes=10
+)
+
+print(f"\nCidade: {cidade_exemplo}")
+print(f"Modelo: {modelo_exemplo}")
+print(f"Tipo: {tipo_exemplo}")
+print(f"Período: Outubro/2024")
+print(f"\n📊 Previsão de vendas: {previsao} unidades")
+10. Salvar o Modelo Treinado
+import joblib
+
+# Salvar o melhor modelo
+joblib.dump(melhor_modelo, 'modelo_vendas_colheitadeiras.pkl')
+joblib.dump(le_cidade, 'label_encoder_cidade.pkl')
+joblib.dump(le_modelo, 'label_encoder_modelo.pkl')
+joblib.dump(le_tipo, 'label_encoder_tipo.pkl')
+
+print("\n✓ Modelo salvo: modelo_vendas_colheitadeiras.pkl")
+print("✓ Encoders salvos para uso futuro")
+11. Carregar e Usar o Modelo Salvo
+# Para usar o modelo posteriormente
+modelo_carregado = joblib.load('modelo_vendas_colheitadeiras.pkl')
+le_cidade_carregado = joblib.load('label_encoder_cidade.pkl')
+le_modelo_carregado = joblib.load('label_encoder_modelo.pkl')
+le_tipo_carregado = joblib.load('label_encoder_tipo.pkl')
+
+print("\n✓ Modelo carregado com sucesso!")
+print("Pronto para fazer novas previsões.")
+Próximos Passos
+Melhorias Recomendadas
+Features Adicionais
+Dados demográficos das cidades (população, PIB, área agrícola)
+Sazonalidade agrícola (safra/entressafra)
+Histórico de vendas de anos anteriores
+Concorrência local
+Preços de commodities agrícolas
+Otimização de Hiperparâmetros
+Usar GridSearchCV ou RandomizedSearchCV
+Testar diferentes configurações de Random Forest e Gradient Boosting
+Validação Cruzada
+Implementar K-Fold Cross-Validation
+Avaliar estabilidade do modelo
+Modelos Avançados
+XGBoost
+LightGBM
+Redes Neurais (se houver dados suficientes)
+Análise de Séries Temporais
+ARIMA/SARIMA para capturar tendências temporais
+Prophet do Facebook para previsões com sazonalidade
+Interpretação dos Resultados
+Métricas de Avaliação
+MAE (Mean Absolute Error): Erro médio absoluto - quanto o modelo erra em média
+RMSE (Root Mean Squared Error): Penaliza erros maiores mais fortemente
+R² (Coefficient of Determination): Proporção da variância explicada (0 a 1, quanto maior melhor)
+Valores de Referência
+R² > 0.7: Modelo bom
+R² > 0.5: Modelo razoável
+R² < 0.5: Modelo precisa de melhorias
+Conclusão
+Este código fornece uma base sólida para prever vendas de colheitadeiras por cidade. O modelo pode ser refinado com dados adicionais e técnicas mais avançadas conforme necessário.
